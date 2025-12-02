@@ -13,7 +13,13 @@ def elgamal_encrypt(message, pubkey):
     k = random.randint(1, p-2)
     a = pow(g, k, p)
     s = pow(y, k, p)
+    
+    # Ensure we are iterating over bytes, not string characters
+    if isinstance(message, str):
+        message = message.encode()
+        
     return [(a, (s * b) % p) for b in message]
 
 def elgamal_decrypt(ciphertext, x, p):
-    return bytes([(b * inverse(pow(a, x, p), p)) % p for a, b in ciphertext]).decode()
+    # Fixed: Removed .decode() to support raw binary data (like AES keys)
+    return bytes([(b * inverse(pow(a, x, p), p)) % p for a, b in ciphertext])
