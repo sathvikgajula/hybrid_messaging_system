@@ -39,7 +39,8 @@ chmod +x deploy/run-relay.sh
 4. TLS in another terminal (install Caddy once with `brew install caddy`):
 
 ```bash
-sudo caddy run --config deploy/Caddyfile.host --adapter caddyfile
+chmod +x deploy/run-caddy.sh
+./deploy/run-caddy.sh
 ```
 
 5. You chatting as a user (separate from the relay):

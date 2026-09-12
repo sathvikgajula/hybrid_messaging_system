@@ -1,3 +1,7 @@
+{
+	email sgajula2025@fau.edu
+}
+
 saled-max.duckdns.org {
 	encode gzip
 	reverse_proxy 127.0.0.1:8000 {
