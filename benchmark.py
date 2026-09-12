@@ -1,55 +1,52 @@
 import timeit
-import aes_utils
+from Crypto.Random import get_random_bytes
+
 import rsa_utils
 import elgamal_utils
 import rabin_utils
-from Crypto.Random import get_random_bytes
+from aes_utils import AES_KEY_LEN
 
-# 1. Setup Phase (One-time cost)
-print("⚙️  Generating 2048-bit RSA, 256-bit ElGamal, and 256-bit Rabin keys...")
+print("Generating 2048-bit RSA, 1024-bit safe-prime ElGamal, and 1024-bit Rabin keys...")
+print("(ElGamal safe-prime search can take a little while)")
 rsa_priv, rsa_pub = rsa_utils.generate_rsa_keys(2048)
-el_pub, el_priv = elgamal_utils.generate_elgamal_keys(256)
-r_n, r_p, r_q = rabin_utils.generate_rabin_keys(256)
+el_pub, el_priv = elgamal_utils.generate_elgamal_keys(1024)
+r_n, r_p, r_q = rabin_utils.generate_rabin_keys(1024)
 
-# We use a random 16-byte AES key for the payload
-aes_key = get_random_bytes(16)
+aes_key = get_random_bytes(AES_KEY_LEN)
 
-# 2. Define Benchmarks
+
 def bench_rsa():
-    # Simulate full KEM cycle: Encrypt AES key -> Decrypt AES key
     enc = rsa_utils.rsa_encrypt(aes_key, rsa_pub)
     rsa_utils.rsa_decrypt(enc, rsa_priv)
 
+
 def bench_elgamal():
-    # ElGamal encryption + decryption
     enc = elgamal_utils.elgamal_encrypt(aes_key, el_pub)
     elgamal_utils.elgamal_decrypt(enc, el_priv, el_pub['p'])
 
+
 def bench_rabin():
-    # Rabin encryption + decryption (getting all 4 roots)
     enc = rabin_utils.rabin_encrypt(aes_key, r_n)
-    # We benchmark the raw math of finding roots, as this is the heavy lifting
     rabin_utils.rabin_decrypt(enc, r_p, r_q)
 
-# 3. Execute
-print("\n🚀 Starting Benchmarks (100 iterations each)...")
+
+print("\nStarting benchmarks (100 wrap/unwrap iterations each)...")
 ITERATIONS = 100
 
 t_rsa = timeit.timeit(bench_rsa, number=ITERATIONS)
 t_elg = timeit.timeit(bench_elgamal, number=ITERATIONS)
 t_rab = timeit.timeit(bench_rabin, number=ITERATIONS)
 
-# 4. Report
 print("-" * 40)
-print(f"RSA (2048-bit):     {t_rsa:.4f} seconds")
-print(f"ElGamal (256-bit):  {t_elg:.4f} seconds")
-print(f"Rabin (256-bit):    {t_rab:.4f} seconds")
+print(f"RSA (2048-bit):              {t_rsa:.4f} seconds")
+print(f"ElGamal (1024-bit safe p):   {t_elg:.4f} seconds")
+print(f"Rabin (1024-bit primes):     {t_rab:.4f} seconds")
 print("-" * 40)
 
 fastest = min(t_rsa, t_elg, t_rab)
 if fastest == t_rab:
-    print("🏆 Winner: Rabin is the fastest algorithm.")
+    print("Fastest here: Rabin.")
 elif fastest == t_rsa:
-    print("🏆 Winner: RSA is the fastest algorithm.")
+    print("Fastest here: RSA.")
 else:
-    print("🏆 Winner: ElGamal is the fastest algorithm.")
+    print("Fastest here: ElGamal.")

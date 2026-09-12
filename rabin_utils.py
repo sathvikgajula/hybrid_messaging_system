@@ -1,6 +1,16 @@
 from Crypto.Util.number import getPrime, inverse
+from aes_utils import AES_KEY_LEN, aes_decrypt
 
-def generate_rabin_keys(bits):
+MIN_BITS = 512
+
+
+def _require_min_bits(bits, label):
+    if bits < MIN_BITS:
+        raise ValueError(f"{label} must be at least {MIN_BITS} bits (got {bits})")
+
+
+def generate_rabin_keys(bits=MIN_BITS):
+    _require_min_bits(bits, "Rabin prime")
     while True:
         p = getPrime(bits)
         if p % 4 == 3:
@@ -11,12 +21,15 @@ def generate_rabin_keys(bits):
             break
     return p * q, p, q
 
+
 def rabin_encrypt(message, n):
     m = int.from_bytes(message, byteorder='big')
+    if m >= n:
+        raise ValueError("Message is too large for this Rabin modulus.")
     return pow(m, 2, n)
 
-def rabin_decrypt(ciphertext, p, q):
 
+def rabin_decrypt(ciphertext, p, q):
     n = p * q
     mp = pow(ciphertext, (p + 1) // 4, p)
     mq = pow(ciphertext, (q + 1) // 4, q)
@@ -24,7 +37,6 @@ def rabin_decrypt(ciphertext, p, q):
     yp = inverse(p, q)
     yq = inverse(q, p)
 
-    # Four possible roots
     r1 = (yp * p * mq + yq * q * mp) % n
     r2 = n - r1
     r3 = (yp * p * mq - yq * q * mp) % n
@@ -32,20 +44,23 @@ def rabin_decrypt(ciphertext, p, q):
 
     return [r1, r2, r3, r4]
 
-from aes_utils import aes_decrypt
+
+def _root_to_key(root):
+    candidate_bytes = root.to_bytes((root.bit_length() + 7) // 8, byteorder='big')
+    if len(candidate_bytes) < AES_KEY_LEN:
+        candidate_bytes = (b'\x00' * (AES_KEY_LEN - len(candidate_bytes))) + candidate_bytes
+    elif len(candidate_bytes) > AES_KEY_LEN:
+        candidate_bytes = candidate_bytes[-AES_KEY_LEN:]
+    return candidate_bytes
+
 
 def recover_rabin_aes_key_and_decrypt(ciphertext, roots):
+    """Try each Rabin root as an AES-GCM key; only the right one authenticates."""
     for root in roots:
-        candidate_bytes = root.to_bytes((root.bit_length() + 7) // 8, byteorder='big')
-
-        if len(candidate_bytes) < 16:
-            candidate_bytes = (b'\x00' * (16 - len(candidate_bytes))) + candidate_bytes
-        elif len(candidate_bytes) > 16:
-            candidate_bytes = candidate_bytes[-16:]
-
+        candidate = _root_to_key(root)
         try:
-            plaintext = aes_decrypt(ciphertext, candidate_bytes)
-            return candidate_bytes, plaintext
+            plaintext = aes_decrypt(ciphertext, candidate)
+            return candidate, plaintext
         except Exception:
             continue
     return None, None

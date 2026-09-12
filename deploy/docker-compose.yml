@@ -1,0 +1,66 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SEALED_BIND: "0.0.0.0"
+      SEALED_TRUST_PROXY: "1"
+      SEALED_DB: /home/sealed/relay.db
+    volumes:
+      - sealed-data:/home/sealed
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - relay
+
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49152-49300:49152-49300/udp"
+    command:
+      - -n
+      - --log-file=stdout
+      - --lt-cred-mech
+      - --use-auth-secret
+      - --static-auth-secret=${SEALED_TURN_SECRET}
+      - --realm=${SEALED_DOMAIN}
+      - --listening-port=3478
+      - --min-port=49152
+      - --max-port=49300
+      - --fingerprint
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+
+volumes:
+  sealed-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,9 @@
+pycryptodome
+hypothesis
+pytest
+fastapi
+uvicorn
+requests
+httpx
+pywebview
+websocket-client

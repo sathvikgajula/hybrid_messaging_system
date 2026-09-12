@@ -1,0 +1,14 @@
+{
+	email {$CADDY_EMAIL}
+}
+
+{$SEALED_DOMAIN} {
+	encode gzip
+	reverse_proxy relay:8000
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

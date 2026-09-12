@@ -1,0 +1,90 @@
+name: Package Sealed
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            artifact: Sealed-windows
+            ext: .exe
+          - os: macos-15-intel
+            artifact: Sealed-macos
+            ext: ""
+          - os: ubuntu-22.04
+            artifact: Sealed-linux
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux WebView deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libgirepository1.0-dev
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: pyinstaller --noconfirm sealed.spec
+      - name: Rename
+        shell: bash
+        run: |
+          mkdir -p dist/out
+          if [ -f dist/Sealed.exe ]; then
+            cp dist/Sealed.exe dist/out/${{ matrix.artifact }}.exe
+          elif [ -f dist/Sealed ]; then
+            cp dist/Sealed dist/out/${{ matrix.artifact }}
+            chmod +x dist/out/${{ matrix.artifact }}
+          else
+            ls -la dist
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/out/*
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            TAG="friends-$(date -u +%Y%m%d)"
+          fi
+          mkdir -p upload
+          find artifacts -type f -exec cp {} upload/ \;
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" upload/* --clobber
+          else
+            gh release create "$TAG" upload/* \
+              --title "Sealed $TAG" \
+              --notes-file FRIENDS.md
+          fi

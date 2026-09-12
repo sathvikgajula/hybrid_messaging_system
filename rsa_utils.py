@@ -4,7 +4,16 @@ from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
 import base64
 
-def generate_rsa_keys(key_size):
+# Project floor for number-theoretic sizes. PyCryptodome still requires RSA >= 1024.
+MIN_BITS = 256
+MIN_RSA_BITS = 1024
+
+def generate_rsa_keys(key_size=2048):
+    if key_size < MIN_BITS:
+        raise ValueError(f"RSA key size must be at least {MIN_BITS} bits (got {key_size})")
+    # PyCryptodome will not generate RSA keys below 1024 bits
+    if key_size < MIN_RSA_BITS:
+        raise ValueError(f"RSA key size must be at least {MIN_RSA_BITS} bits (got {key_size})")
     key = RSA.generate(key_size)
     return key.export_key(), key.publickey().export_key()
 
