@@ -125,7 +125,7 @@ input:focus, select:focus { outline: 2px solid #2a6d5c; }
 .chat-item .t { font-weight: 650; }
 .chat-item .p { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.thread { display: flex; flex-direction: column; min-width: 0; }
+.thread { display: flex; flex-direction: column; min-width: 0; position: relative; }
 .thread-head {
   padding: 16px 20px;
   border-bottom: 1px solid var(--line);
@@ -158,6 +158,26 @@ input:focus, select:focus { outline: 2px solid #2a6d5c; }
 }
 .file-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .file-row button { padding: 6px 10px; font-size: 12px; }
+.thumb {
+  display: block;
+  max-width: 280px;
+  max-height: 220px;
+  border-radius: 10px;
+  margin: 6px 0;
+}
+.drop-hint {
+  position: absolute;
+  inset: 0;
+  background: rgba(29, 79, 69, 0.88);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 18px;
+  pointer-events: none;
+  z-index: 5;
+}
 .messages {
   flex: 1;
   overflow: auto;
@@ -176,6 +196,13 @@ input:focus, select:focus { outline: 2px solid #2a6d5c; }
   font-size: 14px;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.bubble .copy-txt {
+  margin-top: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
 }
 .bubble.me { align-self: flex-end; background: var(--me); }
 .bubble.them { align-self: flex-start; background: var(--them); }

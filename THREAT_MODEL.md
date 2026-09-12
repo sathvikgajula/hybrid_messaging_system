@@ -12,12 +12,12 @@ I used STRIDE as a checklist for this course project. This is not a production m
 | Tampering | Ciphertext gets changed in transit or on the server | Signature is over the ciphertext (encrypt-then-sign). Verification happens **before** decrypt. AES-GCM would also refuse a modified body. |
 | Repudiation | Sender denies sending a message | RSA signatures help, but a stolen keyfile+passphrase is still "you". |
 | Information disclosure | Server or network observer reads the message | Server never gets the AES key in the clear. Key files on disk are passphrase-encrypted. AES keys are random per message. |
-| Denial of service | Flood the inbox / smash the server | Rate limits on register/send/inbox/ICE. Per-user inbox cap. Still a small SQLite box. |
+| Denial of service | Flood the inbox / smash the server | Rate limits on register/send/inbox/ICE/XFTP. Per-user inbox cap. Large-file store is quota’d (8 GB/account, 16 GB total) and expires in 48 h. Still a small SQLite box. |
 | Elevation of privilege | Read someone else's mail | Inbox is an authenticated POST / WebSocket. Groups have no server-side member list. |
 | Membership privacy | Server learns who is in a group | Groups exist only on devices. Fan-out looks like 1:1. A burst of N envelopes can still hint at N recipients (pad later). |
 | Open signup | Anyone on the internet creates accounts | Registration is open. Rate-limited per IP. Group membership is invite-only by the creator. |
 | Call MITM | Relay swaps SDP and sits on the audio | Signaling is encrypt-then-sign. Media is DTLS-SRTP. STUN/TURN run on your VM; TURN auth is short-lived and issued only after identity auth. TURN is blocked from relaying to RFC1918/loopback. |
-| Attachment disclosure | Server reads a file, or a filename path-escapes | File bytes are inside the hybrid ciphertext. Names are stripped to a basename. 2 MB cap. Local copies are re-encrypted at rest. Downloads always use `application/octet-stream`. |
+| Attachment disclosure | Server reads a file, or a filename path-escapes | Small files sit inside the hybrid ciphertext. Large files are AES-GCM chunks; the relay sees only opaque blobs and capability tokens (in headers, not URLs). Names are stripped to a basename. 32 MB in-chat / 4 GB chunked. Local small-file copies are re-encrypted at rest. |
 
 ## Crypto-specific notes
 

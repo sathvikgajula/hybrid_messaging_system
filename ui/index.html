@@ -85,11 +85,12 @@
       </div>
       <div id="messages" class="messages"></div>
       <form id="composer" class="composer">
-        <input id="draft" placeholder="Write a sealed message…" autocomplete="off" />
+        <input id="draft" placeholder="Write, paste, or drop any file (up to 4 GB)…" autocomplete="off" />
         <button class="ghost" id="btn-attach" type="button">Attach</button>
         <button class="primary" type="submit">Send</button>
       </form>
-      <input id="file-input" class="hidden" type="file" />
+      <div id="drop-hint" class="drop-hint hidden">Drop to send a sealed file</div>
+      <input id="file-input" class="hidden" type="file" multiple />
       <audio id="remote-audio" autoplay playsinline></audio>
     </section>
   </div>

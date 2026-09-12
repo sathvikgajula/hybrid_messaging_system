@@ -17,7 +17,7 @@ Then two apps:
 python3 main.py
 ```
 
-Create accounts. Find the other username, chat, attach (2 MB max), or Call.
+Create accounts. Find the other username, chat, attach (32 MB in-chat, 4 GB via sealed chunks), or Call.
 
 Keys live in `~/.sealed_messenger/`. Old `alice.json` / `messenger.db` files will not work.
 
@@ -60,7 +60,7 @@ If Let’s Encrypt fails, port 80 is not reachable from the internet (CGNAT or n
 
 - **Signup:** RSA-2048 identity on the device. The server stores only the signed public bundle.
 - **Lookup:** the client verifies the identity signature. Safety numbers are TOFU.
-- **Chat / files:** AES-256-GCM, RSA-OAEP wrap of the AES key, encrypt-then-sign. Files are Save-only; copies on disk are encrypted again.
+- **Chat / files:** AES-256-GCM, RSA-OAEP wrap of the AES key, encrypt-then-sign. Small files ride in the chat envelope (32 MB). Larger files use XFTP-style sealed chunks on the relay (up to 4 GB, 48 h). **Save as…** picks the folder; local copies of small files are encrypted at rest.
 - **Groups:** no groups table. Fan-out is sealed 1:1 envelopes. Only the creator can invite more people.
 - **Voice:** WebRTC DTLS-SRTP. Signaling is sealed like chat. STUN/TURN credentials come from the relay (TURN secret never ships in the app).
 - **Keyfiles:** PBKDF2 + AES-GCM. Use 8+ characters.

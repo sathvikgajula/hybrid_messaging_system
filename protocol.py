@@ -22,12 +22,24 @@ AUTH_WINDOW_SECONDS = 300
 SCHEMES = ("rsa", "elgamal", "rabin")
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
 MAX_TEXT_BYTES = 16 * 1024
-MAX_FILE_BYTES = 2 * 1024 * 1024
-# Room for JSON + base64 around a max-size file.
-MAX_PLAINTEXT_BYTES = 3 * 1024 * 1024
+# Screenshots and ordinary docs; not a file-share for movies.
+MAX_FILE_BYTES = 32 * 1024 * 1024
+# Inner JSON stores the file as base64 (~4/3) plus names.
+MAX_PLAINTEXT_BYTES = MAX_FILE_BYTES * 4 // 3 + 256 * 1024
+# AES-GCM ciphertext of that inner JSON, then base64 again on the wire.
+MAX_ENVELOPE_BYTES = MAX_PLAINTEXT_BYTES * 4 // 3 + 2 * 1024 * 1024
 MAX_GROUP_MEMBERS = 32
+# SimpleX XFTP-style large files: opaque fixed-size chunks on the relay,
+# keys only inside the sealed chat description. 4 GB cap.
+XFTP_CHUNK_SIZES = (256 * 1024, 1024 * 1024, 4 * 1024 * 1024)
+MAX_XFTP_BYTES = 4 * 1024 * 1024 * 1024
+XFTP_TTL_SECONDS = 48 * 3600
+XFTP_TAG_LEN = 16
+XFTP_PUSH_SLICE = 256 * 1024
+XFTP_FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+XFTP_SECRET_RE = re.compile(r"^[0-9a-f]{64}$")
 CALL_EVENTS = ("offer", "answer", "ice", "hangup", "reject")
-GROUP_EVENTS = ("message", "invite", "update", "file")
+GROUP_EVENTS = ("message", "invite", "update", "file", "xftp")
 MIME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]{0,40}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]{0,40}$")
 
 
@@ -117,7 +129,7 @@ def file_fields(name, data, mime=""):
     if not data:
         raise ValueError("Empty file")
     if len(data) > MAX_FILE_BYTES:
-        raise ValueError(f"Attachment too large (max {MAX_FILE_BYTES} bytes)")
+        raise ValueError(f"Attachment too large (max {MAX_FILE_BYTES // (1024 * 1024)} MB)")
     name = sanitize_filename(name)
     mime = sanitize_mime(mime)
     digest = SHA256.new(data).hexdigest()
@@ -205,7 +217,105 @@ def pack_file(name, data, mime=""):
     return json.dumps(body, separators=(',', ':'))
 
 
-def pack_group(group_id, title, members, text, event="message", file=None):
+def choose_xftp_chunk_size(size):
+    size = int(size)
+    if size > 64 * 1024 * 1024:
+        return XFTP_CHUNK_SIZES[2]
+    if size > 4 * 1024 * 1024:
+        return XFTP_CHUNK_SIZES[1]
+    return XFTP_CHUNK_SIZES[0]
+
+
+def xftp_chunk_count(size, chunk_size):
+    if size <= 0:
+        return 1
+    return (int(size) + int(chunk_size) - 1) // int(chunk_size)
+
+
+def xftp_nonce(key, index):
+    return SHA256.new(key + b"|xftp|" + int(index).to_bytes(8, "big")).digest()[:16]
+
+
+def xftp_seal_chunk(plain, key, index):
+    from Crypto.Cipher import AES
+    from aes_utils import AES_KEY_LEN, _GCM_TAG_LEN
+    if len(key) != AES_KEY_LEN:
+        raise ValueError("Bad file key")
+    cipher = AES.new(key, AES.MODE_GCM, nonce=xftp_nonce(key, index))
+    ct, tag = cipher.encrypt_and_digest(plain)
+    if len(tag) != _GCM_TAG_LEN:
+        raise ValueError("Bad GCM tag")
+    return tag + ct
+
+
+def xftp_open_chunk(blob, key, index):
+    from Crypto.Cipher import AES
+    from aes_utils import AES_KEY_LEN, _GCM_TAG_LEN
+    if len(key) != AES_KEY_LEN or len(blob) < _GCM_TAG_LEN:
+        raise ValueError("Bad chunk")
+    tag, ct = blob[:_GCM_TAG_LEN], blob[_GCM_TAG_LEN:]
+    cipher = AES.new(key, AES.MODE_GCM, nonce=xftp_nonce(key, index))
+    return cipher.decrypt_and_verify(ct, tag)
+
+
+def _xftp_offer_fields(data):
+    if not isinstance(data, dict):
+        return None
+    name = sanitize_filename(data.get("name"))
+    mime = sanitize_mime(data.get("mime"))
+    size = data.get("size")
+    chunk_size = data.get("chunk_size")
+    n_chunks = data.get("n_chunks")
+    sha256 = data.get("sha256")
+    file_id = data.get("file_id")
+    get_secret = data.get("get_secret")
+    key = data.get("key")
+    expires = data.get("expires")
+    if type(size) is not int or size <= 0 or size > MAX_XFTP_BYTES:
+        return None
+    if chunk_size not in XFTP_CHUNK_SIZES:
+        return None
+    if type(n_chunks) is not int or n_chunks != xftp_chunk_count(size, chunk_size):
+        return None
+    if n_chunks > MAX_XFTP_BYTES // XFTP_CHUNK_SIZES[0]:
+        return None
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        return None
+    if not isinstance(file_id, str) or not XFTP_FILE_ID_RE.fullmatch(file_id):
+        return None
+    if not isinstance(get_secret, str) or not XFTP_SECRET_RE.fullmatch(get_secret):
+        return None
+    if not isinstance(key, str) or not XFTP_SECRET_RE.fullmatch(key):
+        return None
+    if type(expires) is not int or expires <= 0:
+        return None
+    return {
+        "name": name,
+        "mime": mime,
+        "size": size,
+        "chunk_size": chunk_size,
+        "n_chunks": n_chunks,
+        "sha256": sha256,
+        "file_id": file_id,
+        "get_secret": get_secret,
+        "key": key,
+        "expires": expires,
+    }
+
+
+def pack_xftp(offer):
+    parsed = _xftp_offer_fields(offer)
+    if not parsed:
+        raise ValueError("Invalid large-file description")
+    body = {"v": 1, "kind": "xftp"}
+    body.update(parsed)
+    packed = json.dumps(body, separators=(",", ":"))
+    if len(packed.encode()) > MAX_TEXT_BYTES:
+        raise ValueError("Large-file description too big")
+    return packed
+
+
+def pack_group(group_id, title, members, text, event="message", file=None, xftp=None):
     if event not in GROUP_EVENTS:
         raise ValueError("Invalid group event")
     if not isinstance(group_id, str) or len(group_id) != 64:
@@ -233,6 +343,15 @@ def pack_group(group_id, title, members, text, event="message", file=None):
         body["file"] = file_fields(file["name"], file["data"], file.get("mime", ""))
         if not body["text"]:
             body["text"] = body["file"]["name"]
+    if xftp is not None:
+        if event != "xftp":
+            raise ValueError("XFTP payload requires event=xftp")
+        parsed = _xftp_offer_fields(xftp)
+        if not parsed:
+            raise ValueError("Invalid large-file description")
+        body["xftp"] = parsed
+        if not body["text"]:
+            body["text"] = parsed["name"]
     return json.dumps(body, separators=(',', ':'))
 
 
@@ -280,6 +399,12 @@ def parse_inner(plaintext):
             return None
         parsed["kind"] = "file"
         return parsed
+    if kind == "xftp":
+        parsed = _xftp_offer_fields(data)
+        if not parsed:
+            return None
+        parsed["kind"] = "xftp"
+        return parsed
     if kind == "call":
         event = data.get("event")
         call_id = data.get("call_id")
@@ -325,6 +450,11 @@ def parse_inner(plaintext):
             if not parsed:
                 return None
             out["file"] = parsed
+        if event == "xftp":
+            parsed = _xftp_offer_fields(data.get("xftp"))
+            if not parsed:
+                return None
+            out["xftp"] = parsed
         return out
     return None
 

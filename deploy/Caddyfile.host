@@ -3,7 +3,11 @@
 }
 
 saled-max.duckdns.org {
-	encode gzip
+	@compressible {
+		header Content-Type application/json*
+		header Content-Type text*
+	}
+	encode @compressible gzip
 	reverse_proxy 127.0.0.1:8000 {
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Real-IP {remote_host}

@@ -98,16 +98,47 @@ function renderSnapshot(snap) {
       const row = document.createElement("div");
       row.className = "file-row";
       const label = document.createElement("span");
-      label.textContent = "📎 " + m.file.name + " · " + (m.file.size || 0) + " bytes";
+      label.textContent = "📎 " + m.file.name + " · " + sizeLabel(m.file.size);
       const save = document.createElement("button");
       save.type = "button";
       save.className = "ghost";
-      save.textContent = "Save";
+      save.textContent = "Save as…";
       save.addEventListener("click", () => saveAttachment(m.file.sha256));
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "ghost";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", () => copyAttachment(m.file));
+      row.append(label, save, copy);
+      el.append(row);
+      if (looksLikeImage(m.file)) {
+        const img = document.createElement("img");
+        img.className = "thumb";
+        img.alt = m.file.name;
+        img.addEventListener("error", () => img.remove());
+        loadPreview(m.file, img);
+        el.append(img);
+      }
+    } else if (m.xftp) {
+      const row = document.createElement("div");
+      row.className = "file-row";
+      const label = document.createElement("span");
+      label.textContent = "📦 " + m.xftp.name + " · " + sizeLabel(m.xftp.size) + " · large file";
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "ghost";
+      save.textContent = "Save as…";
+      save.addEventListener("click", () => downloadXftp(m.xftp.file_id));
       row.append(label, save);
       el.append(row);
     } else {
       el.append(document.createTextNode(m.text || ""));
+      const copyTxt = document.createElement("button");
+      copyTxt.type = "button";
+      copyTxt.className = "ghost copy-txt";
+      copyTxt.textContent = "Copy";
+      copyTxt.addEventListener("click", () => copyText(m.text || ""));
+      el.append(copyTxt);
     }
     const meta = document.createElement("span");
     meta.className = "meta";
@@ -270,26 +301,13 @@ async function boot() {
 
   $("btn-attach").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", async () => {
-    const file = $("file-input").files && $("file-input").files[0];
+    const files = Array.from(($("file-input").files || []));
     $("file-input").value = "";
-    if (!file) return;
-    const snap = await api().snapshot();
-    if (snap.max_file_bytes && file.size > snap.max_file_bytes) {
-      alert("Attachment too large (max 2 MB)");
-      return;
-    }
-    showBusy("Sealing attachment…");
-    try {
-      const data = await readFileB64(file);
-      const res = await api().send_file(file.name, data, file.type || "application/octet-stream", "rsa");
-      hideBusy();
-      if (!res.ok) alert(res.error);
-      else await refresh();
-    } catch (err) {
-      hideBusy();
-      alert(String(err));
+    for (const file of files) {
+      await sendLocalFile(file);
     }
   });
+  wirePasteAndDrop();
 
   $("btn-call").addEventListener("click", () => startCall());
   $("btn-hangup").addEventListener("click", () => hangup(true));
@@ -350,23 +368,251 @@ function readFileB64(file) {
   });
 }
 
-async function saveAttachment(digest) {
-  showBusy("Unlocking attachment…");
-  const res = await api().export_file(digest);
+function looksLikeImage(file) {
+  const mime = (file && file.mime) || "";
+  const name = (file && file.name) || "";
+  return mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+}
+
+const previewCache = {};
+
+async function loadPreview(file, img) {
+  const digest = file.sha256;
+  if (previewCache[digest]) {
+    img.src = previewCache[digest];
+    return;
+  }
+  try {
+    const res = await api().export_file(digest);
+    if (!res.ok) return;
+    const mime = res.mime && res.mime.startsWith("image/") ? res.mime : "image/png";
+    const url = "data:" + mime + ";base64," + res.data;
+    previewCache[digest] = url;
+    img.src = url;
+  } catch (_e) {
+    /* ignore */
+  }
+}
+
+function sizeLabel(n) {
+  if (!n) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return Math.round(n / 1024) + " KB";
+  if (n < 1024 * 1024 * 1024) {
+    const mb = n / (1024 * 1024);
+    return (Math.abs(mb - Math.round(mb)) < 0.05 ? Math.round(mb) : mb.toFixed(1)) + " MB";
+  }
+  const gb = n / (1024 * 1024 * 1024);
+  return (Math.abs(gb - Math.round(gb)) < 0.05 ? Math.round(gb) : gb.toFixed(1)) + " GB";
+}
+
+async function sendLocalFile(file) {
+  if (!file) return;
+  const snap = await api().snapshot();
+  if (!snap.authed || !snap.active) {
+    alert("Open a chat first, then drop or paste the file.");
+    return;
+  }
+  const maxInline = snap.max_file_bytes || 0;
+  const maxLarge = snap.max_xftp_bytes || 0;
+  if (maxLarge && file.size > maxLarge) {
+    alert("Attachment too large (max " + sizeLabel(maxLarge) + ")");
+    return;
+  }
+  if (maxInline && file.size > maxInline) {
+    await sendXftpFile(file, snap);
+    return;
+  }
+  showBusy("Sealing attachment…");
+  try {
+    const data = await readFileB64(file);
+    const res = await api().send_file(file.name || "attachment", data, file.type || "application/octet-stream", "rsa");
+    hideBusy();
+    if (!res.ok) alert(res.error);
+    else await refresh();
+  } catch (err) {
+    hideBusy();
+    alert(String(err));
+  }
+}
+
+async function sendXftpFile(file, snap) {
+  showBusy("Preparing large file…");
+  try {
+    const begin = await api().xftp_begin(file.name || "attachment", file.size, file.type || "application/octet-stream");
+    if (!begin.ok) {
+      hideBusy();
+      alert(begin.error);
+      return;
+    }
+    const slice = begin.slice || 262144;
+    let offset = 0;
+    while (offset < file.size) {
+      const end = Math.min(offset + slice, file.size);
+      const data = await readFileB64(file.slice(offset, end));
+      const res = await api().xftp_push(begin.id, data);
+      if (!res.ok) {
+        hideBusy();
+        alert(res.error);
+        return;
+      }
+      offset = end;
+      showBusy("Uploading sealed chunks… " + (res.pct || Math.round(100 * offset / file.size)) + "%");
+    }
+    showBusy("Sending file description…");
+    const done = await api().xftp_finish(begin.id);
+    hideBusy();
+    if (!done.ok) alert(done.error);
+    else await refresh();
+  } catch (err) {
+    hideBusy();
+    alert(String(err));
+  }
+}
+
+async function downloadXftp(fileId) {
+  showBusy("Choose where to save, then downloading sealed chunks…");
+  const res = await api().download_xftp(fileId);
   hideBusy();
+  if (res.cancelled) return;
   if (!res.ok) {
     alert(res.error);
     return;
   }
-  const bin = atob(res.data);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-  const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = res.name || "attachment";
-  a.click();
-  URL.revokeObjectURL(url);
+  alert("Saved to:\n" + res.path + "\n\nFinder will highlight the file.");
+}
+
+function clipHasFiles(transfer) {
+  if (!transfer) return false;
+  const types = transfer.types ? Array.from(transfer.types) : [];
+  return types.includes("Files") || types.includes("application/x-moz-file");
+}
+
+function filesFromClipboard(clip) {
+  const files = Array.from((clip && clip.files) || []);
+  if (files.length || !clip || !clip.items) return files;
+  for (const item of clip.items) {
+    if (item.kind === "file") {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  return files;
+}
+
+function wirePasteAndDrop() {
+  document.addEventListener("paste", async (e) => {
+    if ($("app").classList.contains("hidden")) return;
+    const clip = e.clipboardData;
+    const files = filesFromClipboard(clip);
+    if (files.length) {
+      e.preventDefault();
+      for (const file of files) await sendLocalFile(file);
+      return;
+    }
+    const target = e.target;
+    const inField = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
+    if (inField) return;
+    const text = clip ? clip.getData("text/plain") : "";
+    if (!text) return;
+    e.preventDefault();
+    const draft = $("draft");
+    draft.value = (draft.value || "") + text;
+    draft.focus();
+  });
+
+  const hint = $("drop-hint");
+  let dragDepth = 0;
+  function showDrop(on) {
+    if (hint) hint.classList.toggle("hidden", !on);
+  }
+  document.addEventListener("dragenter", (e) => {
+    if (!clipHasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    if ($("app").classList.contains("hidden")) return;
+    dragDepth += 1;
+    showDrop(true);
+  });
+  document.addEventListener("dragover", (e) => {
+    if (!clipHasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "copy"; } catch (_e) { /* ignore */ }
+  });
+  document.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) showDrop(false);
+  });
+  document.addEventListener("drop", async (e) => {
+    dragDepth = 0;
+    showDrop(false);
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (!files.length) return;
+    e.preventDefault();
+    if ($("app").classList.contains("hidden")) return;
+    for (const file of files) await sendLocalFile(file);
+  });
+}
+
+async function saveAttachment(digest) {
+  showBusy("Choose where to save…");
+  const res = await api().save_file(digest);
+  hideBusy();
+  if (res.cancelled) return;
+  if (!res.ok) {
+    alert(res.error);
+    return;
+  }
+  alert("Saved to:\n" + res.path + "\n\nFinder will highlight the file.");
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch (_e) {
+    /* fall through */
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  document.execCommand("copy");
+  ta.remove();
+}
+
+async function copyAttachment(file) {
+  showBusy("Copying…");
+  try {
+    if (looksLikeImage(file) && api().copy_file) {
+      const native = await api().copy_file(file.sha256);
+      hideBusy();
+      if (native.ok) {
+        alert("Image copied. Paste it into another app, or back into this chat.");
+        return;
+      }
+    }
+    const res = await api().export_file(file.sha256);
+    hideBusy();
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    const mime = (res.mime && res.mime.startsWith("image/")) ? res.mime : null;
+    if (mime && navigator.clipboard && navigator.clipboard.write && window.ClipboardItem) {
+      const bin = atob(res.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      await navigator.clipboard.write([new ClipboardItem({ [mime]: new Blob([bytes], { type: mime }) })]);
+      alert("Image copied. Paste it anywhere.");
+      return;
+    }
+    alert("Use Save as… to pick a folder, then copy the file from there.");
+  } catch (err) {
+    hideBusy();
+    alert(String(err));
+  }
 }
 
 async function getMic() {

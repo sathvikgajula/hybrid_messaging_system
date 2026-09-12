@@ -5,6 +5,8 @@ import os
 import queue
 import re
 import ssl
+import subprocess
+import sys
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +20,7 @@ import netconfig
 import protocol
 from aes_utils import aes_decrypt_bytes, aes_encrypt
 from Crypto.Random import get_random_bytes
+from Crypto.Hash import SHA256
 
 SERVER, WS_URL = netconfig.load_relay_urls()
 DATA_DIR = os.path.join(os.path.expanduser("~"), ".sealed_messenger")
@@ -26,6 +29,30 @@ CALL_OFFER_SECONDS = 90
 _BLOB_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 FRIEND_SCHEME = "rsa"
 MAX_CHAT_MESSAGES = 400
+
+
+def _guess_mime(name, data, mime=""):
+    mime = (mime or "").strip()
+    if mime.startswith("image/") or (mime and mime != "application/octet-stream"):
+        return protocol.sanitize_mime(mime)
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    lower = str(name or "").lower()
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".jpg") or lower.endswith(".jpeg"):
+        return "image/jpeg"
+    if lower.endswith(".gif"):
+        return "image/gif"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    return protocol.sanitize_mime(mime)
 
 
 def _http_error(resp):
@@ -81,8 +108,10 @@ def _size_label(n):
     if n < 1024:
         return f"{n} B"
     if n < 1024 * 1024:
-        return f" {n / 1024:.1f} KB".strip()
-    return f" {n / (1024 * 1024):.1f} MB".strip()
+        return f"{n / 1024:.1f} KB".strip()
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB".strip()
+    return f"{n / (1024 * 1024 * 1024):.1f} GB".strip()
 
 
 def _serve_ui():
@@ -131,6 +160,7 @@ class Messenger:
         self.call = None
         self.ice_servers = []
         self._job = {"status": "idle"}
+        self._xftp_tx = None
 
     def _emit(self, event):
         self.events.put(event)
@@ -219,6 +249,8 @@ class Messenger:
                     last_msg = chat["messages"][-1]
                     if last_msg.get("file"):
                         last = "📎 " + last_msg["file"]["name"]
+                    elif last_msg.get("xftp"):
+                        last = "📦 " + last_msg["xftp"]["name"]
                     else:
                         last = last_msg.get("text") or ""
                 chats.append({
@@ -234,13 +266,22 @@ class Messenger:
             active = None
             if self.active_chat and self.active_chat in self.state["chats"]:
                 ch = self.state["chats"][self.active_chat]
+                messages = []
+                for msg in ch["messages"][-200:]:
+                    item = dict(msg)
+                    if item.get("xftp"):
+                        xf = dict(item["xftp"])
+                        xf.pop("key", None)
+                        xf.pop("get_secret", None)
+                        item["xftp"] = xf
+                    messages.append(item)
                 active = {
                     "id": self.active_chat,
                     "type": ch["type"],
                     "title": ch["title"],
                     "members": ch.get("members", []),
                     "fingerprint": ch.get("fingerprint"),
-                    "messages": ch["messages"][-200:],
+                    "messages": messages,
                     "can_call": ch["type"] == "dm",
                     "can_invite": ch["type"] == "group" and ch.get("creator") == self.username,
                 }
@@ -253,6 +294,8 @@ class Messenger:
                 "active": active,
                 "call": self.call,
                 "max_file_bytes": protocol.MAX_FILE_BYTES,
+                "max_xftp_bytes": protocol.MAX_XFTP_BYTES,
+                "xftp_slice": protocol.XFTP_PUSH_SLICE,
                 "ice_servers": list(self.ice_servers),
                 "scheme": FRIEND_SCHEME,
             }
@@ -532,7 +575,7 @@ class Messenger:
             resp = requests.post(
                 urljoin(SERVER, "/send"),
                 json={"sender": self.username, "recipient": looked["username"], "payload": payload},
-                timeout=60,
+                timeout=180,
             )
         except requests.RequestException as e:
             return {"ok": False, "error": str(e)}
@@ -617,6 +660,233 @@ class Messenger:
         self._emit({"type": "ready"})
         return {"ok": True, "sha256": fields["sha256"]}
 
+    def _xftp_url(self, file_id, index):
+        return urljoin(SERVER, f"/xftp/{file_id}/{index}")
+
+    def xftp_begin(self, name, size, mime=""):
+        if not self.username:
+            return {"ok": False, "error": "Not signed in"}
+        chat_id = self.active_chat
+        if not chat_id or chat_id not in self.state.get("chats", {}):
+            return {"ok": False, "error": "Pick a conversation first"}
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid file size"}
+        if size <= 0:
+            return {"ok": False, "error": "Empty file"}
+        if size > protocol.MAX_XFTP_BYTES:
+            return {"ok": False, "error": "Attachment too large (max 4 GB)"}
+        self._xftp_abort()
+        chunk_size = protocol.choose_xftp_chunk_size(size)
+        n_chunks = protocol.xftp_chunk_count(size, chunk_size)
+        auth = protocol.inbox_auth_payload(self.username, self.keys["rsa"]["priv"])
+        auth["chunk_size"] = chunk_size
+        auth["n_chunks"] = n_chunks
+        try:
+            resp = requests.post(urljoin(SERVER, "/xftp/create"), json=auth, timeout=30)
+        except requests.RequestException as e:
+            return {"ok": False, "error": str(e)}
+        if resp.status_code != 200:
+            return {"ok": False, "error": _http_error(resp)}
+        info = resp.json()
+        self._xftp_tx = {
+            "chat_id": chat_id,
+            "name": protocol.sanitize_filename(name),
+            "mime": protocol.sanitize_mime(mime),
+            "size": size,
+            "chunk_size": info["chunk_size"],
+            "n_chunks": info["n_chunks"],
+            "file_id": info["file_id"],
+            "put_secret": info["put_secret"],
+            "get_secret": info["get_secret"],
+            "expires": info["expires"],
+            "key": get_random_bytes(32),
+            "hasher": SHA256.new(),
+            "buf": bytearray(),
+            "index": 0,
+            "received": 0,
+        }
+        return {
+            "ok": True,
+            "id": info["file_id"],
+            "slice": protocol.XFTP_PUSH_SLICE,
+            "n_chunks": n_chunks,
+            "chunk_size": chunk_size,
+        }
+
+    def _xftp_abort(self):
+        tx = self._xftp_tx
+        self._xftp_tx = None
+        if not tx:
+            return
+        try:
+            requests.delete(
+                urljoin(SERVER, f"/xftp/{tx['file_id']}"),
+                headers={"X-Sealed-Put": tx["put_secret"]},
+                timeout=15,
+            )
+        except Exception:
+            pass
+
+    def _xftp_put_plain(self, plain):
+        tx = self._xftp_tx
+        blob = protocol.xftp_seal_chunk(plain, tx["key"], tx["index"])
+        resp = requests.put(
+            self._xftp_url(tx["file_id"], tx["index"]),
+            headers={"X-Sealed-Put": tx["put_secret"]},
+            data=blob,
+            timeout=180,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(_http_error(resp))
+        tx["index"] += 1
+
+    def xftp_push(self, file_id, data_b64):
+        tx = self._xftp_tx
+        if not tx or tx["file_id"] != file_id:
+            return {"ok": False, "error": "No large-file upload in progress"}
+        try:
+            data = base64.b64decode(data_b64 or "", validate=True)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Could not read the file"}
+        if tx["received"] + len(data) > tx["size"]:
+            return {"ok": False, "error": "File was larger than announced"}
+        try:
+            tx["hasher"].update(data)
+            tx["received"] += len(data)
+            tx["buf"].extend(data)
+            while len(tx["buf"]) >= tx["chunk_size"]:
+                block = bytes(tx["buf"][: tx["chunk_size"]])
+                del tx["buf"][: tx["chunk_size"]]
+                self._xftp_put_plain(block)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        pct = int(100 * tx["received"] / tx["size"]) if tx["size"] else 100
+        return {"ok": True, "pct": pct}
+
+    def xftp_finish(self, file_id):
+        tx = self._xftp_tx
+        if not tx or tx["file_id"] != file_id:
+            return {"ok": False, "error": "No large-file upload in progress"}
+        if tx["received"] != tx["size"]:
+            self._xftp_abort()
+            return {"ok": False, "error": "File upload was incomplete"}
+        try:
+            published = False
+            if tx["buf"]:
+                pad = tx["chunk_size"] - len(tx["buf"])
+                tx["buf"].extend(b"\x00" * pad)
+                self._xftp_put_plain(bytes(tx["buf"]))
+                tx["buf"].clear()
+            if tx["index"] != tx["n_chunks"]:
+                self._xftp_abort()
+                return {"ok": False, "error": "Chunk count mismatch"}
+            offer = {
+                "name": tx["name"],
+                "mime": tx["mime"],
+                "size": tx["size"],
+                "chunk_size": tx["chunk_size"],
+                "n_chunks": tx["n_chunks"],
+                "sha256": tx["hasher"].hexdigest(),
+                "file_id": tx["file_id"],
+                "get_secret": tx["get_secret"],
+                "key": tx["key"].hex(),
+                "expires": tx["expires"],
+            }
+            chat = self.state["chats"][tx["chat_id"]]
+            extra = {"xftp": dict(offer)}
+            preview = f"📦 {offer['name']} ({_size_label(offer['size'])}) · large file"
+            if chat["type"] == "dm":
+                other = [m for m in chat["members"] if m != self.username][0]
+                packed = protocol.pack_xftp(offer)
+                result = self._send_envelope(other, packed, FRIEND_SCHEME)
+                if not result.get("ok"):
+                    return result
+            else:
+                packed = protocol.pack_group(
+                    chat["group_id"],
+                    chat["title"],
+                    chat["members"],
+                    offer["name"],
+                    event="xftp",
+                    xftp=offer,
+                )
+                for member in [m for m in chat["members"] if m != self.username]:
+                    result = self._send_envelope(member, packed, FRIEND_SCHEME)
+                    if not result.get("ok"):
+                        return {"ok": False, "error": f"Could not reach @{member}: {result.get('error')}"}
+            published = True
+            self._append_local(tx["chat_id"], self.username, preview, FRIEND_SCHEME, extra)
+            self._persist()
+            self._emit({"type": "ready"})
+            self._xftp_tx = None
+            return {"ok": True, "file_id": offer["file_id"]}
+        except Exception as e:
+            if published:
+                self._xftp_tx = None
+            else:
+                self._xftp_abort()
+            return {"ok": False, "error": str(e)}
+
+    def download_xftp(self, file_id):
+        if not self.username:
+            return {"ok": False, "error": "Not signed in"}
+        offer = None
+        for chat in self.state.get("chats", {}).values():
+            for msg in chat.get("messages", []):
+                info = msg.get("xftp") or {}
+                if info.get("file_id") == file_id:
+                    offer = info
+                    break
+            if offer:
+                break
+        parsed = protocol._xftp_offer_fields(offer or {})
+        if not parsed:
+            return {"ok": False, "error": "Unknown large file"}
+        path, cancelled = self._pick_save_path(parsed["name"])
+        if cancelled or not path:
+            return {"ok": False, "cancelled": True, "error": "Save cancelled"}
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        parent = os.path.dirname(path)
+        if not parent or not os.path.isdir(parent):
+            return {"ok": False, "error": "That folder does not exist"}
+        key = bytes.fromhex(parsed["key"])
+        hasher = SHA256.new()
+        written = 0
+        tmp = path + ".part"
+        try:
+            with open(tmp, "wb") as out:
+                for index in range(parsed["n_chunks"]):
+                    resp = requests.get(
+                        self._xftp_url(parsed["file_id"], index),
+                        headers={"X-Sealed-Get": parsed["get_secret"]},
+                        timeout=180,
+                    )
+                    if resp.status_code != 200:
+                        raise RuntimeError(_http_error(resp) if resp.text is not None else "Download failed")
+                    plain = protocol.xftp_open_chunk(resp.content, key, index)
+                    remain = parsed["size"] - written
+                    if remain <= 0:
+                        raise RuntimeError("File was larger than announced")
+                    if len(plain) > remain:
+                        plain = plain[:remain]
+                    hasher.update(plain)
+                    out.write(plain)
+                    written += len(plain)
+            if written != parsed["size"] or hasher.hexdigest() != parsed["sha256"]:
+                raise RuntimeError("File failed integrity check")
+            os.replace(tmp, path)
+        except Exception as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return {"ok": False, "error": str(e)}
+        self._save_dir = parent
+        self._reveal_path(path)
+        return {"ok": True, "path": path}
+
     def export_file(self, digest):
         if not self.username:
             return {"ok": False, "error": "Not signed in"}
@@ -625,19 +895,128 @@ class Messenger:
         data = self._load_blob(digest)
         if data is None:
             return {"ok": False, "error": "Attachment is not on this device"}
+        name, mime = self._file_meta(digest)
+        return {
+            "ok": True,
+            "name": protocol.sanitize_filename(name),
+            "mime": _guess_mime(name, data, mime),
+            "data": base64.b64encode(data).decode(),
+        }
+
+    def _file_meta(self, digest):
         name = "attachment"
+        mime = "application/octet-stream"
         for chat in self.state.get("chats", {}).values():
             for msg in chat.get("messages", []):
                 info = msg.get("file") or {}
                 if info.get("sha256") == digest:
                     name = info.get("name") or name
-                    break
-        return {
-            "ok": True,
-            "name": protocol.sanitize_filename(name),
-            "mime": "application/octet-stream",
-            "data": base64.b64encode(data).decode(),
-        }
+                    mime = info.get("mime") or mime
+                    return name, mime
+        return name, mime
+
+    def _reveal_path(self, path):
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(path) or "."])
+        except Exception:
+            pass
+
+    def _unique_path(self, folder, name):
+        base, ext = os.path.splitext(name)
+        path = os.path.join(folder, name)
+        n = 1
+        while os.path.exists(path):
+            path = os.path.join(folder, f"{base} ({n}){ext}")
+            n += 1
+        return path
+
+    def _pick_save_path(self, name):
+        downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(downloads, exist_ok=True)
+        start_dir = getattr(self, "_save_dir", None) or downloads
+        try:
+            import webview
+            window = getattr(self, "_window", None)
+            if window is None:
+                windows = getattr(webview, "windows", None) or []
+                window = windows[0] if windows else None
+            if window is None:
+                return self._unique_path(downloads, name), False
+            save_kind = getattr(webview, "SAVE_DIALOG", None)
+            if save_kind is None:
+                save_kind = webview.FileDialog.SAVE
+            chosen = window.create_file_dialog(
+                save_kind,
+                directory=start_dir,
+                save_filename=name,
+            )
+            if not chosen:
+                return None, True
+            path = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
+            return str(path), False
+        except Exception:
+            return self._unique_path(downloads, name), False
+
+    def save_file(self, digest):
+        if not self.username:
+            return {"ok": False, "error": "Not signed in"}
+        if not isinstance(digest, str) or not _BLOB_ID_RE.fullmatch(digest):
+            return {"ok": False, "error": "Unknown attachment"}
+        data = self._load_blob(digest)
+        if data is None:
+            return {"ok": False, "error": "Attachment is not on this device"}
+        name = protocol.sanitize_filename(self._file_meta(digest)[0])
+        path, cancelled = self._pick_save_path(name)
+        if cancelled or not path:
+            return {"ok": False, "cancelled": True, "error": "Save cancelled"}
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        parent = os.path.dirname(path)
+        if not parent or not os.path.isdir(parent):
+            return {"ok": False, "error": "That folder does not exist"}
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            return {"ok": False, "error": f"Could not write file: {exc}"}
+        self._save_dir = parent
+        self._reveal_path(path)
+        return {"ok": True, "path": path}
+
+    def copy_file(self, digest):
+        if not self.username:
+            return {"ok": False, "error": "Not signed in"}
+        if not isinstance(digest, str) or not _BLOB_ID_RE.fullmatch(digest):
+            return {"ok": False, "error": "Unknown attachment"}
+        data = self._load_blob(digest)
+        if data is None:
+            return {"ok": False, "error": "Attachment is not on this device"}
+        name, mime = self._file_meta(digest)
+        mime = _guess_mime(name, data, mime)
+        if sys.platform == "darwin" and mime.startswith("image/"):
+            import tempfile
+            suffix = ".png" if "png" in mime else ".jpg" if "jpeg" in mime else ".gif" if "gif" in mime else ".bin"
+            handle, tmp = tempfile.mkstemp(suffix=suffix)
+            try:
+                with os.fdopen(handle, "wb") as f:
+                    f.write(data)
+                quoted = tmp.replace("\\", "\\\\").replace('"', '\\"')
+                kind = "«class PNGf»" if suffix == ".png" else "JPEG picture" if suffix == ".jpg" else "«class GIFf»"
+                script = f'set the clipboard to (read (POSIX file "{quoted}") as {kind})'
+                done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+                if done.returncode != 0:
+                    return {"ok": False, "error": "Could not copy image"}
+                return {"ok": True, "kind": "image"}
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        return {"ok": False, "error": "Use Save as… then copy the file from that folder"}
 
     def _active_dm_peer(self):
         chat_id = self.active_chat
@@ -908,6 +1287,9 @@ class Messenger:
             if inner["kind"] == "file":
                 cid = self._ensure_dm(sender, looked["fingerprint"])
                 self._handle_file(cid, sender, scheme, inner)
+            elif inner["kind"] == "xftp":
+                cid = self._ensure_dm(sender, looked["fingerprint"])
+                self._handle_xftp(cid, sender, scheme, inner)
             elif inner["kind"] == "direct":
                 cid = self._ensure_dm(sender, looked["fingerprint"])
                 self._append_local(cid, sender, inner["text"], scheme)
@@ -958,8 +1340,19 @@ class Messenger:
         if event == "file" and inner.get("file"):
             self._handle_file(cid, sender, scheme, inner["file"])
             return
+        if event == "xftp" and inner.get("xftp"):
+            self._handle_xftp(cid, sender, scheme, inner["xftp"])
+            return
         if inner.get("text"):
             self._append_local(cid, sender, inner["text"], scheme)
+
+    def _handle_xftp(self, chat_id, sender, scheme, offer):
+        parsed = protocol._xftp_offer_fields(offer)
+        if not parsed:
+            return
+        extra = {"xftp": parsed}
+        preview = f"📦 {parsed['name']} ({_size_label(parsed['size'])}) · large file"
+        self._append_local(chat_id, sender, preview, scheme, extra)
 
 
 class JsBridge:
@@ -996,8 +1389,26 @@ class JsBridge:
     def send_file(self, name, data_b64, mime, scheme):
         return self.m.send_file(name, data_b64, mime, scheme)
 
+    def xftp_begin(self, name, size, mime):
+        return self.m.xftp_begin(name, size, mime)
+
+    def xftp_push(self, file_id, data_b64):
+        return self.m.xftp_push(file_id, data_b64)
+
+    def xftp_finish(self, file_id):
+        return self.m.xftp_finish(file_id)
+
+    def download_xftp(self, file_id):
+        return self.m.download_xftp(file_id)
+
     def export_file(self, digest):
         return self.m.export_file(digest)
+
+    def save_file(self, digest):
+        return self.m.save_file(digest)
+
+    def copy_file(self, digest):
+        return self.m.copy_file(digest)
 
     def call_start(self, sdp):
         return self.m.call_start(sdp)
@@ -1024,7 +1435,7 @@ def run_gui():
     messenger = Messenger()
     bridge = JsBridge(messenger)
     url, httpd = _serve_ui()
-    webview.create_window(
+    window = webview.create_window(
         "Sealed",
         url,
         js_api=bridge,
@@ -1033,6 +1444,7 @@ def run_gui():
         min_size=(880, 580),
         background_color="#0c1117",
     )
+    messenger._window = window
     try:
         webview.start()
     finally:

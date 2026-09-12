@@ -27,15 +27,8 @@ def run_cli_client(keyfile):
 
 
 def run_server():
-    import uvicorn
-    from server import app, assert_safe_bind
-    assert_safe_bind()
-    uvicorn.run(
-        app,
-        host=os.environ.get("SEALED_BIND", "127.0.0.1"),
-        port=int(os.environ.get("SEALED_PORT", "8000")),
-        proxy_headers=os.environ.get("SEALED_TRUST_PROXY") == "1",
-    )
+    from server import run_relay
+    run_relay()
 
 
 def run_gui():

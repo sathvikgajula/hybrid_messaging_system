@@ -9,15 +9,18 @@ import time
 import base64
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 import database
 import protocol
+import xftp
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-MAX_ENVELOPE_BYTES = 8 * 1024 * 1024
+MAX_ENVELOPE_BYTES = protocol.MAX_ENVELOPE_BYTES
 MAX_INBOX_MESSAGES = 400
-MAX_INBOX_BYTES = 32 * 1024 * 1024
+MAX_INBOX_BYTES = 8 * protocol.MAX_ENVELOPE_BYTES
+WS_MAX_BYTES = protocol.MAX_ENVELOPE_BYTES
 TURN_TTL_SECONDS = 6 * 3600
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
 _nonce_lock = threading.Lock()
@@ -131,6 +134,11 @@ class InboxAuthRequest(BaseModel):
     timestamp: int
     nonce: str
     signature: str
+
+
+class XftpCreateRequest(InboxAuthRequest):
+    chunk_size: int
+    n_chunks: int
 
 
 class ConnectionManager:
@@ -279,6 +287,86 @@ def get_ice(req: InboxAuthRequest, request: Request):
     return {"iceServers": ice_servers()}
 
 
+def _xftp_http_error(exc):
+    if isinstance(exc, PermissionError):
+        raise HTTPException(status_code=401, detail=str(exc) or "Unauthorized")
+    if isinstance(exc, FileNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc) or "Not found")
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=400, detail=str(exc))
+    raise HTTPException(status_code=400, detail="XFTP error")
+
+
+def _xftp_token(request, kind):
+    header = "x-sealed-put" if kind == "put" else "x-sealed-get"
+    return (request.headers.get(header) or "").strip()
+
+
+async def _xftp_limited_body(request):
+    pieces = []
+    total = 0
+    async for piece in request.stream():
+        total += len(piece)
+        if total > xftp.MAX_CHUNK_WIRE:
+            raise HTTPException(status_code=413, detail="Chunk too large")
+        pieces.append(piece)
+    return b"".join(pieces)
+
+
+@app.post("/xftp/create")
+def xftp_create(req: XftpCreateRequest, request: Request):
+    if not _rate_ok("xftp-c:" + _client_ip(request), 20, 60):
+        raise HTTPException(status_code=429, detail="Too many attempts")
+    username, _keys = _authed_user(req)
+    if not _fresh_nonce("xftp-c:" + req.username + ":" + str(req.nonce)):
+        raise HTTPException(status_code=401, detail="Replayed xftp auth")
+    try:
+        return xftp.create(req.chunk_size, req.n_chunks, owner=username)
+    except Exception as exc:
+        _xftp_http_error(exc)
+
+
+@app.put("/xftp/{file_id}/{index}")
+async def xftp_put(file_id: str, index: int, request: Request):
+    if not _rate_ok("xftp-p:" + _client_ip(request), 600, 60):
+        raise HTTPException(status_code=429, detail="Too many attempts")
+    put_secret = _xftp_token(request, "put")
+    data = await _xftp_limited_body(request)
+    try:
+        return xftp.put_chunk(file_id, index, put_secret, data)
+    except Exception as exc:
+        _xftp_http_error(exc)
+
+
+@app.get("/xftp/{file_id}/{index}")
+def xftp_get(file_id: str, index: int, request: Request):
+    if not _rate_ok("xftp-g:" + _client_ip(request), 600, 60):
+        raise HTTPException(status_code=429, detail="Too many attempts")
+    get_secret = _xftp_token(request, "get")
+    try:
+        data = xftp.get_chunk(file_id, index, get_secret)
+    except Exception as exc:
+        _xftp_http_error(exc)
+        return
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete("/xftp/{file_id}")
+def xftp_delete(file_id: str, request: Request):
+    if not _rate_ok("xftp-d:" + _client_ip(request), 40, 60):
+        raise HTTPException(status_code=429, detail="Too many attempts")
+    put_secret = _xftp_token(request, "put")
+    try:
+        xftp.delete_file(file_id, put_secret)
+    except Exception as exc:
+        _xftp_http_error(exc)
+    return {"ok": True}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -344,7 +432,7 @@ async def websocket_endpoint(ws: WebSocket):
             manager.disconnect(username, ws)
 
 
-if __name__ == "__main__":
+def run_relay():
     import uvicorn
     assert_safe_bind()
     uvicorn.run(
@@ -352,4 +440,10 @@ if __name__ == "__main__":
         host=os.environ.get("SEALED_BIND", "127.0.0.1"),
         port=int(os.environ.get("SEALED_PORT", "8000")),
         proxy_headers=os.environ.get("SEALED_TRUST_PROXY") == "1",
+        ws_max_size=WS_MAX_BYTES,
+        timeout_keep_alive=120,
     )
+
+
+if __name__ == "__main__":
+    run_relay()

@@ -9,6 +9,7 @@ services:
       SEALED_BIND: "0.0.0.0"
       SEALED_TRUST_PROXY: "1"
       SEALED_DB: /home/sealed/relay.db
+      SEALED_XFTP_DIR: /home/sealed/xftp
     volumes:
       - sealed-data:/home/sealed
     expose:

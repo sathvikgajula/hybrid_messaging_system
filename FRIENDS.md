@@ -36,4 +36,6 @@ sudo apt install -y gir1.2-webkit2-4.1 python3-gi
 
 Create an account (username + passphrase, 8+ characters). Then find their `@username` and chat.
 
+You can drop or attach ordinary files (pictures, PDFs). Files over 32 MB are sent as sealed chunks (up to 4 GB) and stay on the relay for 48 hours — the host does not need to stay in the chat window, but the relay must stay running. Use **Save as…** to pick where they land.
+
 Do not post your keyfile (`~/.sealed_messenger/`) anywhere public.

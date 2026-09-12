@@ -2,7 +2,9 @@ import sys
 import os
 import json
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -98,8 +100,9 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(again["data"], b"hello-bytes")
 
     def test_file_rejects_oversize_and_bad_hash(self):
-        with self.assertRaises(ValueError):
-            protocol.pack_file("big.bin", b"x" * (protocol.MAX_FILE_BYTES + 1))
+        with patch.object(protocol, "MAX_FILE_BYTES", 16):
+            with self.assertRaises(ValueError):
+                protocol.pack_file("big.bin", b"x" * 17)
         packed = protocol.pack_file("ok.bin", b"abc")
         data = json.loads(packed)
         data["sha256"] = "0" * 64
@@ -107,6 +110,32 @@ class TestProtocol(unittest.TestCase):
         data = json.loads(packed)
         data["size"] = True
         self.assertIsNone(protocol.parse_inner(json.dumps(data)))
+
+    def test_xftp_description_roundtrip_and_chunk_gcm(self):
+        key = os.urandom(32)
+        plain = b"hello-xftp" + os.urandom(200)
+        padded = plain + b"\x00" * (protocol.XFTP_CHUNK_SIZES[0] - len(plain))
+        blob = protocol.xftp_seal_chunk(padded, key, 0)
+        out = protocol.xftp_open_chunk(blob, key, 0)
+        self.assertEqual(out[: len(plain)], plain)
+        offer = {
+            "name": "movie.bin",
+            "mime": "application/octet-stream",
+            "size": len(plain),
+            "chunk_size": protocol.XFTP_CHUNK_SIZES[0],
+            "n_chunks": 1,
+            "sha256": "ab" * 32,
+            "file_id": "ab" * 16,
+            "get_secret": "cd" * 32,
+            "key": key.hex(),
+            "expires": int(time.time()) + 3600,
+        }
+        inner = protocol.parse_inner(protocol.pack_xftp(offer))
+        self.assertEqual(inner["kind"], "xftp")
+        self.assertEqual(inner["name"], "movie.bin")
+        self.assertEqual(inner["size"], len(plain))
+        with self.assertRaises(ValueError):
+            protocol.pack_xftp({**offer, "size": protocol.MAX_XFTP_BYTES + 1})
 
     def test_call_signal_is_signed_inner_payload(self):
         call_id = protocol.new_call_id()
@@ -171,6 +200,8 @@ class TestServerAuth(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         cls.tmp.close()
+        cls.xftdir = tempfile.mkdtemp()
+        os.environ["SEALED_XFTP_DIR"] = cls.xftdir
         database.configure(cls.tmp.name)
         from fastapi.testclient import TestClient
         from server import app
@@ -195,6 +226,12 @@ class TestServerAuth(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         os.unlink(cls.tmp.name)
+        for root, dirs, files in os.walk(cls.xftdir, topdown=False):
+            for name in files:
+                os.unlink(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
+        os.rmdir(cls.xftdir)
 
     def test_inbox_rejects_missing_auth(self):
         resp = self.client.get("/inbox/alice")
@@ -269,6 +306,43 @@ class TestServerAuth(unittest.TestCase):
         urls = [s["urls"] for s in iced.json()["iceServers"]]
         self.assertTrue(any(u.startswith("stun:") for u in urls))
         self.assertTrue(any(u.startswith("turn:") for u in urls))
+
+    def test_xftp_chunk_put_get_and_rejects_bad_token(self):
+        os.environ["SEALED_XFTP_DIR"] = self.xftdir
+        chunk_size = protocol.XFTP_CHUNK_SIZES[0]
+        auth = protocol.inbox_auth_payload("alice", self.alice["rsa"]["priv"])
+        auth["chunk_size"] = chunk_size
+        auth["n_chunks"] = 1
+        created = self.client.post("/xftp/create", json=auth)
+        self.assertEqual(created.status_code, 200, created.text)
+        info = created.json()
+        key = os.urandom(32)
+        plain = os.urandom(1000)
+        padded = plain + b"\x00" * (chunk_size - len(plain))
+        blob = protocol.xftp_seal_chunk(padded, key, 0)
+        put = self.client.put(
+            f"/xftp/{info['file_id']}/0",
+            headers={"X-Sealed-Put": info["put_secret"]},
+            content=blob,
+        )
+        self.assertEqual(put.status_code, 200, put.text)
+        bad = self.client.get(
+            f"/xftp/{info['file_id']}/0",
+            headers={"X-Sealed-Get": "ab" * 32},
+        )
+        self.assertEqual(bad.status_code, 401)
+        got = self.client.get(
+            f"/xftp/{info['file_id']}/0",
+            headers={"X-Sealed-Get": info["get_secret"]},
+        )
+        self.assertEqual(got.status_code, 200)
+        opened = protocol.xftp_open_chunk(got.content, key, 0)
+        self.assertEqual(opened[: len(plain)], plain)
+        gone = self.client.delete(
+            f"/xftp/{info['file_id']}",
+            headers={"X-Sealed-Put": info["put_secret"]},
+        )
+        self.assertEqual(gone.status_code, 200)
 
 
 class TestNetconfig(unittest.TestCase):
