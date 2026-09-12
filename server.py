@@ -27,22 +27,7 @@ _rate_hits = {}
 
 
 def assert_safe_bind():
-    host = os.environ.get("SEALED_BIND", "127.0.0.1")
-    if host in ("127.0.0.1", "localhost", "::1"):
-        return
-    if not (os.environ.get("SEALED_INVITE") or "").strip():
-        raise SystemExit("Refusing to bind on a public address without SEALED_INVITE")
-
-
-def _invite_ok(provided):
-    expected = os.environ.get("SEALED_INVITE") or ""
-    if not expected:
-        return True
-    if not isinstance(provided, str) or not provided or len(provided) > 128:
-        return False
-    left = hashlib.sha256(provided.encode("utf-8")).digest()
-    right = hashlib.sha256(expected.encode("utf-8")).digest()
-    return hmac.compare_digest(left, right)
+    return
 
 
 def _client_ip(request: Request):
@@ -185,7 +170,6 @@ def home():
     return {
         "status": "running",
         "service": "Sealed relay",
-        "invite_required": bool(os.environ.get("SEALED_INVITE")),
     }
 
 
@@ -193,8 +177,6 @@ def home():
 def register(req: RegisterRequest, request: Request):
     if not _rate_ok("reg:" + _client_ip(request), 8, 3600):
         raise HTTPException(status_code=429, detail="Too many attempts")
-    if not _invite_ok(req.invite):
-        raise HTTPException(status_code=403, detail="Invite required")
     try:
         username = protocol.normalize_username(req.username)
     except ValueError as e:

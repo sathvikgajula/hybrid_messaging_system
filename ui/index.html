@@ -44,11 +44,8 @@
         <label>Confirm passphrase
           <input id="signup-pass2" type="password" autocomplete="new-password" />
         </label>
-        <label>Invite code
-          <input id="signup-invite" autocomplete="off" placeholder="Invite code" />
-        </label>
         <button class="primary" type="submit">Generate keys &amp; sign up</button>
-        <p class="hint">RSA-2048 on this device. Local demo can leave invite blank; a public relay requires one.</p>
+        <p class="hint">RSA-2048 identity keys stay on this device. Pick a username friends can find.</p>
       </form>
       <p id="auth-error" class="error"></p>
     </div>
@@ -66,6 +63,7 @@
       <div class="search-row">
         <input id="find-user" placeholder="Find @username" />
         <button class="ghost" id="btn-dm" type="button">Chat</button>
+        <button class="primary" id="btn-find-call" type="button">Call</button>
       </div>
       <button class="ghost wide" id="btn-group" type="button">New encrypted group</button>
       <div id="chat-list" class="chat-list"></div>
@@ -77,7 +75,8 @@
           <p id="thread-sub">Messages are sealed on your device before they hit the network.</p>
         </div>
         <div class="thread-actions">
-          <button class="ghost hidden" id="btn-call" type="button">Call</button>
+          <button class="ghost hidden" id="btn-invite" type="button">Invite</button>
+          <button class="primary hidden" id="btn-call" type="button">Audio call</button>
         </div>
       </header>
       <div id="call-bar" class="call-bar hidden">
@@ -97,9 +96,9 @@
 
   <div id="modal" class="modal hidden">
     <div class="modal-card">
-      <h3>New group</h3>
-      <p class="hint">Member names stay on your devices. The relay only sees separate sealed 1:1 envelopes.</p>
-      <label>Group name
+      <h3 id="group-modal-title">New group</h3>
+      <p class="hint">Member names stay on your devices. The relay only sees separate sealed 1:1 envelopes. Only you, the creator, can invite later.</p>
+      <label id="group-title-row">Group name
         <input id="group-title" placeholder="Group name" />
       </label>
       <label>People to invite

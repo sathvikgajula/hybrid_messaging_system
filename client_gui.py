@@ -242,6 +242,7 @@ class Messenger:
                     "fingerprint": ch.get("fingerprint"),
                     "messages": ch["messages"][-200:],
                     "can_call": ch["type"] == "dm",
+                    "can_invite": ch["type"] == "group" and ch.get("creator") == self.username,
                 }
             return {
                 "authed": True,
@@ -296,7 +297,6 @@ class Messenger:
                         "username": username,
                         "public_keys": pubs,
                         "identity_sig": sig,
-                        "invite": invite or "",
                     },
                     timeout=30,
                 )
@@ -750,6 +750,53 @@ class Messenger:
         self._emit({"type": "ready"})
         return {"ok": True, "id": cid}
 
+    def invite_to_group(self, usernames):
+        if not self.username:
+            return {"ok": False, "error": "Not signed in"}
+        chat_id = self.active_chat
+        if not chat_id or chat_id not in self.state.get("chats", {}):
+            return {"ok": False, "error": "Open a group first"}
+        chat = self.state["chats"][chat_id]
+        if chat["type"] != "group":
+            return {"ok": False, "error": "Invites are for groups only"}
+        if chat.get("creator") != self.username:
+            return {"ok": False, "error": "Only the group creator can invite"}
+        raw = [u.strip() for u in (usernames or "").replace(",", " ").split() if u.strip()]
+        try:
+            newcomers = [protocol.normalize_username(u) for u in raw]
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        newcomers = [u for u in dict.fromkeys(newcomers) if u not in chat["members"]]
+        if not newcomers:
+            return {"ok": False, "error": "Add at least one new username"}
+        members = list(chat["members"]) + newcomers
+        if len(members) > protocol.MAX_GROUP_MEMBERS:
+            return {"ok": False, "error": f"Groups can have at most {protocol.MAX_GROUP_MEMBERS} members"}
+        for u in newcomers:
+            looked = self.lookup(u)
+            if not looked.get("ok"):
+                return {"ok": False, "error": f"@{u}: {looked.get('error')}"}
+        try:
+            packed_invite = protocol.pack_group(chat["group_id"], chat["title"], members, "", event="invite")
+            packed_update = protocol.pack_group(chat["group_id"], chat["title"], members, "", event="update")
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        existing = [m for m in chat["members"] if m != self.username]
+        for u in newcomers:
+            result = self._send_envelope(u, packed_invite, "rsa")
+            if not result.get("ok"):
+                return {"ok": False, "error": f"Invite to @{u} failed: {result.get('error')}"}
+        for u in existing:
+            result = self._send_envelope(u, packed_update, "rsa")
+            if not result.get("ok"):
+                return {"ok": False, "error": f"Could not update @{u}: {result.get('error')}"}
+        chat["members"] = members
+        names = ", ".join("@" + u for u in newcomers)
+        self._append_local(chat_id, self.username, "Invited " + names + ".", "rsa")
+        self._persist()
+        self._emit({"type": "ready"})
+        return {"ok": True, "id": chat_id, "members": members}
+
     def _append_local(self, chat_id, sender, text, scheme, extra=None):
         chat = self.state["chats"][chat_id]
         msg = {
@@ -963,6 +1010,9 @@ class JsBridge:
 
     def create_group(self, title, usernames):
         return self.m.create_group(title, usernames)
+
+    def invite_to_group(self, usernames):
+        return self.m.invite_to_group(usernames)
 
     def confirm_key(self, username):
         return self.m.confirm_key(username)

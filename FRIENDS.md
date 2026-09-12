@@ -34,6 +34,6 @@ sudo apt install -y gir1.2-webkit2-4.1 python3-gi
 
 ## Account
 
-Create account with the **invite code** the host sent you (not in this repo). Username like `alice`. Passphrase 8+ characters. Then find their `@username` and chat.
+Create an account (username + passphrase, 8+ characters). Then find their `@username` and chat.
 
-Do not post the invite code or your keyfile (`~/.sealed_messenger/`) anywhere public.
+Do not post your keyfile (`~/.sealed_messenger/`) anywhere public.

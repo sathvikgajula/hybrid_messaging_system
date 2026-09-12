@@ -17,7 +17,7 @@ Then two apps:
 python3 main.py
 ```
 
-Create accounts (invite can be empty on localhost). Find the other username, chat, attach (2 MB max), or Call.
+Create accounts. Find the other username, chat, attach (2 MB max), or Call.
 
 Keys live in `~/.sealed_messenger/`. Old `alice.json` / `messenger.db` files will not work.
 
@@ -49,7 +49,7 @@ chmod +x deploy/run-host-app.sh
 ./deploy/run-host-app.sh
 ```
 
-That forces `http://127.0.0.1:8000` so your home router does not need hairpin NAT. Signup uses the invite in `deploy/.env` (`SEALED_INVITE`) — send that code to friends privately, never commit it.
+That forces `http://127.0.0.1:8000` so your home router does not need hairpin NAT. Friends create their own usernames; you invite people into groups from the app (creator only).
 
 6. Friends download the GitHub Release for their OS. The HTTPS URL is already inside the file.
 
@@ -57,10 +57,10 @@ If Let’s Encrypt fails, port 80 is not reachable from the internet (CGNAT or n
 
 ## What is encrypted where
 
-- **Signup:** RSA-2048 identity on the device. A public relay also requires your invite code. The server stores only the signed public bundle.
+- **Signup:** RSA-2048 identity on the device. The server stores only the signed public bundle.
 - **Lookup:** the client verifies the identity signature. Safety numbers are TOFU.
 - **Chat / files:** AES-256-GCM, RSA-OAEP wrap of the AES key, encrypt-then-sign. Files are Save-only; copies on disk are encrypted again.
-- **Groups:** no groups table. Fan-out is sealed 1:1 envelopes.
+- **Groups:** no groups table. Fan-out is sealed 1:1 envelopes. Only the creator can invite more people.
 - **Voice:** WebRTC DTLS-SRTP. Signaling is sealed like chat. STUN/TURN credentials come from the relay (TURN secret never ships in the app).
 - **Keyfiles:** PBKDF2 + AES-GCM. Use 8+ characters.
 

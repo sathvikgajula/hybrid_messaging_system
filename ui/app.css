@@ -108,7 +108,8 @@ input:focus, select:focus { outline: 2px solid #2a6d5c; }
 }
 .pill.off { background: #3a2430; color: #ff8b98; }
 .search-row { display: flex; gap: 8px; margin-top: 16px; }
-.search-row input { flex: 1; }
+.search-row input { flex: 1; min-width: 0; }
+.search-row .primary { padding: 10px 12px; }
 .chat-list { margin-top: 8px; overflow: auto; flex: 1; }
 .chat-item {
   width: 100%;

@@ -76,8 +76,9 @@ function renderSnapshot(snap) {
   box.replaceChildren();
   if (!snap.active) {
     title.textContent = "Select a chat";
-    sub.textContent = "Find someone by username. Keys are verified before you send.";
+    sub.textContent = "Find a friend by username, then Chat or Call. Voice is 1:1 only.";
     $("btn-call").classList.add("hidden");
+    $("btn-invite").classList.add("hidden");
     renderCallChrome(snap.call);
     return;
   }
@@ -89,6 +90,7 @@ function renderSnapshot(snap) {
     sub.textContent = "Safety number " + (a.fingerprint || "") + " · " + (a.members || []).length + " of you";
   }
   $("btn-call").classList.toggle("hidden", a.type !== "dm");
+  $("btn-invite").classList.toggle("hidden", !a.can_invite);
   (a.messages || []).forEach((m) => {
     const el = document.createElement("div");
     el.className = "bubble " + (m.mine ? "me" : "them");
@@ -142,6 +144,23 @@ $("tab-signup").addEventListener("click", showSignup);
 $("form-login").addEventListener("submit", (e) => e.preventDefault());
 $("form-signup").addEventListener("submit", (e) => e.preventDefault());
 
+let groupModalMode = "create";
+
+function openGroupModal(mode) {
+  groupModalMode = mode === "invite" ? "invite" : "create";
+  $("group-error").textContent = "";
+  if (groupModalMode === "invite") {
+    $("group-modal-title").textContent = "Invite to group";
+    $("group-title-row").classList.add("hidden");
+    $("group-create").textContent = "Invite";
+  } else {
+    $("group-modal-title").textContent = "New group";
+    $("group-title-row").classList.remove("hidden");
+    $("group-create").textContent = "Create";
+  }
+  $("modal").classList.remove("hidden");
+}
+
 async function boot() {
   const bridge = await waitApi();
 
@@ -162,8 +181,7 @@ async function boot() {
     const res = await bridge.signup(
       $("signup-user").value,
       $("signup-pass").value,
-      $("signup-pass2").value,
-      $("signup-invite").value
+      $("signup-pass2").value
     );
     if (!res.ok) {
       hideBusy();
@@ -203,12 +221,30 @@ async function boot() {
     await refresh();
   });
 
-  $("btn-group").addEventListener("click", () => $("modal").classList.remove("hidden"));
+  $("btn-find-call").addEventListener("click", async () => {
+    const name = $("find-user").value;
+    showBusy("Opening a sealed call…");
+    const res = await bridge.start_dm(name);
+    hideBusy();
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    $("find-user").value = "";
+    await refresh();
+    await startCall();
+  });
+
+  $("btn-group").addEventListener("click", () => openGroupModal("create"));
+  $("btn-invite").addEventListener("click", () => openGroupModal("invite"));
   $("group-cancel").addEventListener("click", () => $("modal").classList.add("hidden"));
   $("group-create").addEventListener("click", async () => {
     $("group-error").textContent = "";
+    const people = $("group-people").value;
     showBusy("Sealing invites…");
-    const res = await bridge.create_group($("group-title").value, $("group-people").value);
+    const res = groupModalMode === "invite"
+      ? await bridge.invite_to_group(people)
+      : await bridge.create_group($("group-title").value, people);
     hideBusy();
     if (!res.ok) {
       $("group-error").textContent = res.error;

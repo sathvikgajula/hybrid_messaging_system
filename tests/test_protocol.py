@@ -246,24 +246,17 @@ class TestServerAuth(unittest.TestCase):
             "alice", bundle["public_keys"], bundle["identity_sig"]
         ))
 
-    def test_register_requires_invite_when_configured(self):
+    def test_register_does_not_require_invite(self):
         from unittest.mock import patch
         mallory = protocol.generate_user_keys(1024, 512, 512, rsa_only=True)
         pubs, sig = protocol.sign_identity_bundle("zoe", mallory)
         with patch.dict(os.environ, {"SEALED_INVITE": "correct-horse-invite"}):
-            denied = self.client.post("/register", json={
-                "username": "zoe",
-                "public_keys": pubs,
-                "identity_sig": sig,
-            })
-            self.assertEqual(denied.status_code, 403)
             ok = self.client.post("/register", json={
                 "username": "zoe",
                 "public_keys": pubs,
                 "identity_sig": sig,
-                "invite": "correct-horse-invite",
             })
-            self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertEqual(ok.status_code, 200, ok.text)
 
     def test_ice_requires_inbox_auth(self):
         resp = self.client.post("/ice", json={})
@@ -376,6 +369,32 @@ class TestGroupRoster(unittest.TestCase):
         }
         self.m._ingest_group("alice", inner, "rsa")
         self.assertEqual(self.m.state["chats"][cid]["members"], ["alice", "mallory", "eve"])
+
+    def test_only_creator_can_invite_to_existing_group(self):
+        gid = protocol.new_group_id()
+        cid = self._group(gid, ["alice", "mallory"], creator="alice")
+        self.m.active_chat = cid
+        self.m.username = "mallory"
+        denied = self.m.invite_to_group("eve")
+        self.assertFalse(denied.get("ok"))
+        self.m.username = "alice"
+
+        def fake_lookup(username, trust_if_new=True):
+            username = protocol.normalize_username(username)
+            return {"ok": True, "username": username, "public_keys": {"rsa": "x"}, "fingerprint": "00"}
+
+        self.m.lookup = fake_lookup
+        sent = []
+
+        def fake_send(to_user, plaintext, scheme):
+            sent.append((to_user, plaintext, scheme))
+            return {"ok": True}
+
+        self.m._send_envelope = fake_send
+        ok = self.m.invite_to_group("eve")
+        self.assertTrue(ok.get("ok"), ok)
+        self.assertIn("eve", self.m.state["chats"][cid]["members"])
+        self.assertTrue(any(u == "eve" for u, _p, _s in sent))
 
 
 class TestClientIp(unittest.TestCase):
