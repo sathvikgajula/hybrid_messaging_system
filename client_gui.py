@@ -25,6 +25,7 @@ MAX_SEEN = 400
 CALL_OFFER_SECONDS = 90
 _BLOB_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 FRIEND_SCHEME = "rsa"
+MAX_CHAT_MESSAGES = 400
 
 
 def _http_error(resp):
@@ -94,6 +95,10 @@ def _serve_ui():
 
         def log_message(self, *_args):
             return
+
+        def end_headers(self):
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
@@ -334,7 +339,7 @@ class Messenger:
         if not os.path.exists(path):
             return {"ok": False, "error": "No keyfile for that username on this device"}
         try:
-            stored_user, keys, _, state = keyfile.load_keyfile(path, passphrase)
+            stored_user, keys, _, state = keyfile.load_keyfile(path, passphrase, require_encrypted=True)
         except Exception:
             return {"ok": False, "error": "Could not unlock keyfile (wrong passphrase or corrupt file)"}
         if protocol.normalize_username(stored_user) != username:
@@ -731,6 +736,7 @@ class Messenger:
                 "group_id": group_id,
                 "title": (title or "Group").strip()[:40] or "Group",
                 "members": members,
+                "creator": self.username,
                 "messages": [],
                 "updated": time.time(),
             }
@@ -756,6 +762,8 @@ class Messenger:
         if extra:
             msg.update(extra)
         chat["messages"].append(msg)
+        if len(chat["messages"]) > MAX_CHAT_MESSAGES:
+            chat["messages"] = chat["messages"][-MAX_CHAT_MESSAGES:]
         chat["updated"] = time.time()
 
     def _handle_file(self, chat_id, sender, scheme, file_info):
@@ -828,6 +836,7 @@ class Messenger:
                 return
             looked = self.lookup(sender)
             if looked.get("code") == "tofu":
+                self._mark_seen(nonce)
                 self._emit({"type": "error", "error": looked.get("error")})
                 return
             if not looked.get("ok"):
@@ -856,41 +865,54 @@ class Messenger:
                 cid = self._ensure_dm(sender, looked["fingerprint"])
                 self._append_local(cid, sender, inner["text"], scheme)
             else:
-                gid = inner["group_id"]
-                cid = f"grp:{gid}"
-                chats = self.state.setdefault("chats", {})
-                members = inner["members"]
-                if self.username not in members or sender not in members:
-                    return
-                if cid not in chats:
-                    if inner.get("event") != "invite":
-                        return
-                    chats[cid] = {
-                        "type": "group",
-                        "group_id": gid,
-                        "title": inner["title"],
-                        "members": members,
-                        "messages": [],
-                        "updated": time.time(),
-                    }
-                elif sender not in chats[cid]["members"]:
-                    return
-                elif inner.get("event") in ("invite", "update"):
-                    chats[cid]["members"] = members
-                    chats[cid]["title"] = inner["title"]
-                if inner.get("event") == "invite" and not inner.get("text"):
-                    self._append_local(
-                        cid, sender,
-                        f"Added you to “{inner['title']}”. Member list stays on your device.",
-                        scheme,
-                    )
-                elif inner.get("event") == "file" and inner.get("file"):
-                    self._handle_file(cid, sender, scheme, inner["file"])
-                elif inner.get("text"):
-                    self._append_local(cid, sender, inner["text"], scheme)
+                self._ingest_group(sender, inner, scheme, looked.get("fingerprint"))
             self._mark_seen(nonce)
             if persist:
                 self._persist()
+
+    def _ingest_group(self, sender, inner, scheme, fingerprint=None):
+        gid = inner["group_id"]
+        cid = f"grp:{gid}"
+        chats = self.state.setdefault("chats", {})
+        packet_members = inner["members"]
+        if self.username not in packet_members or sender not in packet_members:
+            return
+        event = inner.get("event")
+        if cid not in chats:
+            if event != "invite":
+                return
+            chats[cid] = {
+                "type": "group",
+                "group_id": gid,
+                "title": inner["title"],
+                "members": packet_members,
+                "creator": sender,
+                "messages": [],
+                "updated": time.time(),
+            }
+            if inner.get("text"):
+                self._append_local(cid, sender, inner["text"], scheme)
+            else:
+                self._append_local(
+                    cid, sender,
+                    f"Added you to “{inner['title']}”. Member list stays on your device.",
+                    scheme,
+                )
+            return
+        chat = chats[cid]
+        if sender not in chat["members"]:
+            return
+        creator = chat.get("creator")
+        if event in ("invite", "update"):
+            if creator and sender == creator:
+                chat["members"] = packet_members
+                chat["title"] = inner["title"]
+            return
+        if event == "file" and inner.get("file"):
+            self._handle_file(cid, sender, scheme, inner["file"])
+            return
+        if inner.get("text"):
+            self._append_local(cid, sender, inner["text"], scheme)
 
 
 class JsBridge:

@@ -66,13 +66,16 @@ def _decrypt_blob(data, passphrase):
     return json.loads(plaintext.decode())
 
 
-def load_keyfile(path, passphrase):
+def load_keyfile(path, passphrase, require_encrypted=False):
     with open(path, 'r') as f:
         data = json.load(f)
 
     if data.get("kdf") == "pbkdf2-sha256":
         inner = _decrypt_blob(data, passphrase)
         return inner["username"], inner["keys"], True, inner.get("state") or {}
+
+    if require_encrypted:
+        raise ValueError("Keyfile is not encrypted")
 
     if "username" in data and "keys" in data:
         return data["username"], data["keys"], False, data.get("state") or {}

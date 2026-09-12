@@ -48,8 +48,12 @@ def _invite_ok(provided):
 def _client_ip(request: Request):
     if os.environ.get("SEALED_TRUST_PROXY") == "1":
         forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()[:64] or "0.0.0.0"
+        hops = [h.strip()[:64] for h in forwarded.split(",") if h.strip()]
+        if hops:
+            return hops[-1]
+        real = (request.headers.get("x-real-ip") or "").strip()
+        if real:
+            return real[:64]
     if request.client and request.client.host:
         return request.client.host
     return "0.0.0.0"
@@ -244,6 +248,10 @@ def _accept_envelope(sender, recipient, payload):
 
 
 async def _deliver(sender, recipient, payload):
+    if not _rate_ok("in:" + recipient, 120, 60):
+        raise HTTPException(status_code=429, detail="Recipient is receiving too fast")
+    if not _rate_ok("pair:" + sender + ":" + recipient, 40, 60):
+        raise HTTPException(status_code=429, detail="Too many messages to that user")
     pushed = await manager.push(recipient, {"type": "msg", "from": sender, "payload": payload})
     if pushed:
         return sender, recipient, payload

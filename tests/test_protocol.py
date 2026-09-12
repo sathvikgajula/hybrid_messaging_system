@@ -329,5 +329,77 @@ class TestNetconfig(unittest.TestCase):
         self.assertEqual(plaintext, "hi")
 
 
+class TestGroupRoster(unittest.TestCase):
+    def setUp(self):
+        import client_gui
+        self.m = client_gui.Messenger()
+        self.m.username = "alice"
+        self.m.state = {"tofu": {}, "chats": {}, "seen": []}
+
+    def _group(self, gid, members, creator="alice"):
+        cid = f"grp:{gid}"
+        self.m.state["chats"][cid] = {
+            "type": "group",
+            "group_id": gid,
+            "title": "G",
+            "members": members,
+            "creator": creator,
+            "messages": [],
+            "updated": 0,
+        }
+        return cid
+
+    def test_non_creator_cannot_add_eavesdropper(self):
+        gid = protocol.new_group_id()
+        cid = self._group(gid, ["alice", "mallory"], creator="alice")
+        inner = {
+            "kind": "group",
+            "event": "update",
+            "group_id": gid,
+            "title": "G",
+            "members": ["alice", "mallory", "eve"],
+            "text": "",
+        }
+        self.m._ingest_group("mallory", inner, "rsa")
+        self.assertEqual(self.m.state["chats"][cid]["members"], ["alice", "mallory"])
+
+    def test_creator_can_update_members(self):
+        gid = protocol.new_group_id()
+        cid = self._group(gid, ["alice", "mallory"], creator="alice")
+        inner = {
+            "kind": "group",
+            "event": "update",
+            "group_id": gid,
+            "title": "G",
+            "members": ["alice", "mallory", "eve"],
+            "text": "",
+        }
+        self.m._ingest_group("alice", inner, "rsa")
+        self.assertEqual(self.m.state["chats"][cid]["members"], ["alice", "mallory", "eve"])
+
+
+class TestClientIp(unittest.TestCase):
+    def test_trust_proxy_uses_last_hop(self):
+        from unittest.mock import MagicMock, patch
+        import server
+        req = MagicMock()
+        req.headers.get.side_effect = lambda k, d="": {
+            "x-forwarded-for": "1.1.1.1, 9.9.9.9",
+            "x-real-ip": "",
+        }.get(k, d)
+        req.client.host = "127.0.0.1"
+        with patch.dict(os.environ, {"SEALED_TRUST_PROXY": "1"}):
+            self.assertEqual(server._client_ip(req), "9.9.9.9")
+
+    def test_without_proxy_uses_socket_peer(self):
+        from unittest.mock import MagicMock, patch
+        import server
+        req = MagicMock()
+        req.headers.get.return_value = "1.1.1.1"
+        req.client.host = "10.0.0.8"
+        with patch.dict(os.environ, {"SEALED_TRUST_PROXY": "0"}):
+            self.assertEqual(server._client_ip(req), "10.0.0.8")
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -26,7 +26,7 @@
       </div>
       <form id="form-login" class="stack">
         <label>Username
-          <input id="login-user" autocomplete="username" placeholder="alice" />
+          <input id="login-user" autocomplete="username" />
         </label>
         <label>Passphrase
           <input id="login-pass" type="password" autocomplete="current-password" />
@@ -35,7 +35,7 @@
       </form>
       <form id="form-signup" class="stack hidden">
         <label>Username
-          <input id="signup-user" autocomplete="username" placeholder="alice" />
+          <input id="signup-user" autocomplete="username" />
         </label>
         <p class="hint">3–32 characters. Letters, numbers, underscore. Bound to your public key.</p>
         <label>Passphrase
@@ -45,7 +45,7 @@
           <input id="signup-pass2" type="password" autocomplete="new-password" />
         </label>
         <label>Invite code
-          <input id="signup-invite" autocomplete="off" placeholder="from the person who runs the relay" />
+          <input id="signup-invite" autocomplete="off" placeholder="Invite code" />
         </label>
         <button class="primary" type="submit">Generate keys &amp; sign up</button>
         <p class="hint">RSA-2048 on this device. Local demo can leave invite blank; a public relay requires one.</p>
@@ -100,10 +100,10 @@
       <h3>New group</h3>
       <p class="hint">Member names stay on your devices. The relay only sees separate sealed 1:1 envelopes.</p>
       <label>Group name
-        <input id="group-title" placeholder="Weekend" />
+        <input id="group-title" placeholder="Group name" />
       </label>
       <label>People to invite
-        <input id="group-people" placeholder="bob carol" />
+        <input id="group-people" placeholder="usernames, separated by spaces" />
       </label>
       <div class="row">
         <button class="ghost" type="button" id="group-cancel">Cancel</button>

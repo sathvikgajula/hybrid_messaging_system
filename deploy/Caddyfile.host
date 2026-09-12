@@ -1,6 +1,9 @@
 saled-max.duckdns.org {
 	encode gzip
-	reverse_proxy 127.0.0.1:8000
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+	}
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options nosniff

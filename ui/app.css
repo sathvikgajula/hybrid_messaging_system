@@ -55,6 +55,9 @@ html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
   background: transparent;
   color: var(--muted);
   border: 1px solid var(--line);
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
 }
 .tab.on { color: var(--text); background: var(--accent-dim); border-color: #2a6d5c; }
 .stack { display: grid; gap: 12px; }

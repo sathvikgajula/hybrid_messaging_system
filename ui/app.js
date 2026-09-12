@@ -123,20 +123,27 @@ async function refresh() {
   renderSnapshot(snap);
 }
 
+function showLogin() {
+  $("tab-login").classList.add("on");
+  $("tab-signup").classList.remove("on");
+  $("form-login").classList.remove("hidden");
+  $("form-signup").classList.add("hidden");
+}
+
+function showSignup() {
+  $("tab-signup").classList.add("on");
+  $("tab-login").classList.remove("on");
+  $("form-signup").classList.remove("hidden");
+  $("form-login").classList.add("hidden");
+}
+
+$("tab-login").addEventListener("click", showLogin);
+$("tab-signup").addEventListener("click", showSignup);
+$("form-login").addEventListener("submit", (e) => e.preventDefault());
+$("form-signup").addEventListener("submit", (e) => e.preventDefault());
+
 async function boot() {
   const bridge = await waitApi();
-  $("tab-login").onclick = () => {
-    $("tab-login").classList.add("on");
-    $("tab-signup").classList.remove("on");
-    $("form-login").classList.remove("hidden");
-    $("form-signup").classList.add("hidden");
-  };
-  $("tab-signup").onclick = () => {
-    $("tab-signup").classList.add("on");
-    $("tab-login").classList.remove("on");
-    $("form-signup").classList.remove("hidden");
-    $("form-login").classList.add("hidden");
-  };
 
   $("form-login").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -533,3 +540,5 @@ async function onCallEvent(ev) {
     renderCallChrome(null);
   }
 }
+
+boot();
